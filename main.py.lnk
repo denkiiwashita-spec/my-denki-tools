@@ -1,0 +1,160 @@
+import streamlit as st
+from PIL import Image, ImageDraw, ImageFont
+import datetime
+import io
+
+# --- ページの設定 ---
+st.set_page_config(page_title="現場写真 電子黒板合成", layout="centered")
+st.title("📸 現場写真 電子黒板合成ツール")
+st.write("写真をアップロードして、現場作業の黒板を合成します。")
+
+# --- 入力エリア（サイドバー） ---
+st.sidebar.header("📝 黒板の内容入力")
+
+# 項目入力
+pj_name = st.sidebar.text_input("工事件名", "〇〇ビル 受変電設備点検")
+work_type = st.sidebar.text_input("工種・作業内容", "月次点検（低圧盤）")
+contractor = st.sidebar.text_input("施工者", "〇〇電気管理事務所")
+
+# 日付入力（今日の日付を初期値に）
+date_today = st.sidebar.date_input("日付", datetime.date.today())
+date_str = date_today.strftime("%Y年%m月%d日")
+
+# 黒板の位置とサイズ（オプション）
+board_pos = st.sidebar.selectbox("黒板の位置", ["右下", "左下", "右上", "左上"])
+board_scale = st.sidebar.slider("黒板の大きさ倍率", 0.5, 2.0, 1.0, 0.1)
+
+# --- 写真のアップロード ---
+uploaded_file = st.file_uploader("現場写真をアップロードしてください", type=["jpg", "jpeg", "png"])
+
+if uploaded_file is not None:
+    # アップロードされた画像を読み込む
+    base_image = Image.open(uploaded_file)
+    
+    # 画像が横向きになってしまう場合の補正
+    # (スマホ写真はあるあるなので)
+    try:
+        exif = base_image._getexif()
+        if exif:
+            orientation = exif.get(0x0112)
+            if orientation == 3: base_image = base_image.rotate(180, expand=True)
+            elif orientation == 6: base_image = base_image.rotate(270, expand=True)
+            elif orientation == 8: base_image = base_image.rotate(90, expand=True)
+    except Exception:
+        pass
+
+    # --- 画像処理（黒板の合成） ---
+    with st.spinner('黒板を合成中...'):
+        # 1. 描画用のオブジェクトを作成
+        draw = ImageDraw.Draw(base_image)
+        img_width, img_height = base_image.size
+
+        # 2. フォントの設定（日本語フォントを指定）
+        # Windowsの一般的なフォントパスです。もしエラーが出る場合は確認が必要です。
+        font_path = "C:\\Windows\\Fonts\\msgothic.ttc" 
+        
+        # 写真の解像度に合わせて文字サイズを自動調整
+        base_font_size = int(img_width / 25 * board_scale)
+        try:
+            font = ImageFont.truetype(font_path, base_font_size)
+            font_title = ImageFont.truetype(font_path, int(base_font_size * 1.2)) # タイトルは少し大きく
+        except IOError:
+            st.error(f"フォントファイルが見つかりません: {font_path}")
+            st.stop()
+
+        # 3. 黒板（緑色の矩形）のサイズ計算
+        text_content = [
+            f"工事件名: {pj_name}",
+            f"作業内容: {work_type}",
+            f"日　付  : {date_str}",
+            f"施工者  : {contractor}"
+        ]
+        
+        # テキストの最大幅と高さを計算して黒板のサイズを決める
+        max_text_width = 0
+        total_text_height = 0
+        line_height = int(base_font_size * 1.5)
+        
+        for line in text_content:
+            # 💡 Pillow 10.0.0以降はtextbboxを使う必要があります
+            try:
+                bbox = draw.textbbox((0, 0), line, font=font)
+                w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            except AttributeError:
+                # 古いPillowの場合の予備（古い環境用）
+                w, h = draw.textsize(line, font=font) 
+            
+            max_text_width = max(max_text_width, w)
+            total_text_height += line_height
+
+        # 黒板の余白（パディング）
+        padding = int(base_font_size * 0.8)
+        board_width = max_text_width + padding * 2
+        board_height = total_text_height + padding * 2
+
+        # 4. 黒板を描画する位置（座標）の決定
+        if board_pos == "右下":
+            board_x = img_width - board_width - padding
+            board_y = img_height - board_height - padding
+        elif board_pos == "左下":
+            board_x = padding
+            board_y = img_height - board_height - padding
+        elif board_pos == "右上":
+            board_x = img_width - board_width - padding
+            board_y = padding
+        elif board_pos == "左上":
+            board_x = padding
+            board_y = padding
+
+        # 5. 黒板（背景）を描画（少し透過させる）
+        board_layer = Image.new('RGBA', base_image.size, (0, 0, 0, 0))
+        board_draw = ImageDraw.Draw(board_layer)
+        
+        # 黒板の色（暗い緑色、少しチョークっぽく）
+        # (赤, 緑, 青, 透過度0-255)
+        board_color = (0, 60, 0, 230) 
+        
+        board_draw.rectangle(
+            [board_x, board_y, board_x + board_width, board_y + board_height],
+            fill=board_color,
+            outline=(200, 200, 200), # 白い枠線
+            width=int(base_font_size / 10)
+        )
+        
+        # 元画像と黒板レイヤーを合成
+        base_image = Image.alpha_composite(base_image.convert('RGBA'), board_layer)
+        draw = ImageDraw.Draw(base_image) # 描画オブジェクトを更新
+
+        # 6. 黒板の上に文字を描画（白）
+        current_y = board_y + padding
+        for line in text_content:
+            # チョークっぽい白
+            text_color = (240, 240, 240, 255) 
+            draw.text((board_x + padding, current_y), line, font=font, fill=text_color)
+            current_y += line_height
+
+        # RGBAからRGBに戻す（JPGで保存できるように）
+        result_image = base_image.convert('RGB')
+
+    # --- 結果の表示 ---
+    st.header("✅ 合成結果")
+    st.image(result_image, caption="黒板合成後の写真", use_column_width=True)
+
+    # --- ダウンロードボタン ---
+    # 画像をバイナリデータに変換
+    img_bytes = io.BytesIO()
+    result_image.save(img_bytes, format='JPEG')
+    img_bytes = img_bytes.getvalue()
+
+    # ファイル名に日付を入れる
+    filename = f"field_photo_{date_today.strftime('%Y%m%d_%H%M%S')}.jpg"
+
+    st.download_button(
+        label="📥 合成した写真をダウンロード",
+        data=img_bytes,
+        file_name=filename,
+        mime="image/jpeg"
+    )
+
+else:
+    st.info("👈 左側のサイドバーで黒板の内容を入力し、ここに写真をアップロードしてください。")
